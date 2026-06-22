@@ -1,0 +1,17 @@
+{
+  "name": "collab-ws-server",
+  "version": "1.0.0",
+  "description": "Yjs WebSocket 协同编辑同步服务器",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "lib0": "^0.2.99",
+    "ws": "^8.18.2",
+    "y-protocols": "^1.0.6",
+    "y-websocket": "^2.0.0",
+    "yjs": "^13.6.27"
+  }
+}

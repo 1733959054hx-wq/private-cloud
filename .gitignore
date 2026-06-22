@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+
+# Build output
+target/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.iws
+*.iml
+*.ipr
+.classpath
+.factorypath
+.project
+.settings/
+.sts4-cache
+
+# Logs
+*.log
+hs_err_pid*.log
+replay_pid*.log
+
+# Temp & uploads
+temp/
+uploads/
+departments/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Maven wrapper
+.mvn/wrapper/maven-wrapper.jar
+
+# NPM
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Vite
+*.timestamp-*.mjs

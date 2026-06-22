@@ -1,0 +1,264 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-unused-vars */
+
+import MarkdownIt from 'markdown-it'
+import hljs from 'highlight.js'
+import 'highlight.js/styles/github-dark.css'
+
+// 自己实现安全的 HTML 转义，免去对 md.utils 的依赖，彻底杜绝 utils 相关的类型警告
+function escapeHtml(unsafe: string): string {
+  return unsafe
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
+}
+
+// 采用最稳健的初始化传参，并将 md 显式声明为 any，彻底清除 renderer 与 highlight 的编辑器报错
+const md: any = new MarkdownIt('default', {
+  html: false,
+  linkify: true,
+  typographer: true,
+  breaks: true,
+  highlight: function (str: string, lang: string): string {
+    // 关键修正：强制将语言标识转化为小写（如 XML -> xml），解决 xml/json 等大写标签不触发高亮的问题
+    const cleanLang = (lang || '').trim().toLowerCase()
+    if (cleanLang && hljs.getLanguage(cleanLang)) {
+      try {
+        return hljs.highlight(str, { language: cleanLang }).value
+      } catch (__) { /* ignore */ }
+    }
+    return ''
+  }
+}).enable('table')
+
+// 只允许 http/https/mailto 协议的链接，其余一律不转为 <a>
+md.validateLink = function (url: string): boolean {
+  return /^(https?:|mailto:|#|\/)/i.test(url)
+}
+
+// 自定义代码块渲染规则（带语言标签和复制按钮）
+md.renderer.rules.fence = (tokens: any[], idx: number, options: any, _env: any, _self: any): string => {
+  const token = tokens[idx]
+  const code = token.content.trim()
+  const lang = token.info.trim() || 'txt'
+
+  const highlightedCode = options.highlight
+    ? options.highlight(token.content, lang, '')
+    : escapeHtml(token.content)
+
+  const safeCode = encodeURIComponent(code)
+
+  return `<div class="code-block-wrapper">
+    <div class="code-block-header">
+      <span class="code-block-lang">${lang}</span>
+      <button class="code-block-copy-btn" data-code="${safeCode}">复制</button>
+    </div>
+    <pre class="hljs"><code>${highlightedCode || escapeHtml(token.content)}</code></pre>
+  </div>`
+}
+
+// 安全链接过滤：只允许 http/https/mailto 协议，其余一律渲染为纯文本
+const defaultLinkOpenRender = md.renderer.rules.link_open
+md.renderer.rules.link_open = (tokens: any[], idx: number, options: any, env: any, self: any): string => {
+  const hrefIdx = tokens[idx].attrIndex('href')
+  if (hrefIdx >= 0) {
+    const href = tokens[idx].attrs[hrefIdx][1]
+    if (!/^(https?:|mailto:|#|\/)/i.test(href)) {
+      // 非安全协议：输出纯文本 span 代替 <a>
+      return '<span class="unsafe-link">'
+    }
+  }
+  if (defaultLinkOpenRender) {
+    return defaultLinkOpenRender(tokens, idx, options, env, self)
+  }
+  return self.renderToken(tokens, idx, options)
+}
+
+// 对应的 link_close 也需要处理：当 link_open 被替换为 span 时，close 标签也要匹配
+const defaultLinkCloseRender = md.renderer.rules.link_close
+md.renderer.rules.link_close = (tokens: any[], idx: number, options: any, env: any, self: any): string => {
+  // 向前查找匹配的 open 标签，判断是否被替换为了 span
+  for (let i = idx - 1; i >= 0; i--) {
+    if (tokens[i].type === 'link_open') {
+      const hrefIdx = tokens[i].attrIndex('href')
+      if (hrefIdx >= 0) {
+        const href = tokens[i].attrs[hrefIdx][1]
+        if (!/^(https?:|mailto:|#|\/)/i.test(href)) {
+          return '</span>'
+        }
+      }
+      break
+    }
+  }
+  if (defaultLinkCloseRender) {
+    return defaultLinkCloseRender(tokens, idx, options, env, self)
+  }
+  return self.renderToken(tokens, idx, options)
+}
+
+// ==========================================
+// 统一渲染入口
+// ==========================================
+export function renderMarkdown(text: string): string {
+  if (!text) return ''
+  try {
+    const fixed = fixAiMarkdown(text)
+    return md.render(fixed)
+  } catch {
+    return escapeText(text)
+  }
+}
+
+export function renderStreamingMarkdown(text: string): string {
+  if (!text) return ''
+  try {
+    const patched = patchIncompleteMarkdown(text)
+    const fixed = fixAiMarkdown(patched)
+    return md.render(fixed)
+  } catch {
+    return escapeText(text)
+  }
+}
+
+// ==========================================
+// 辅助流式拼接
+// ==========================================
+function patchIncompleteMarkdown(text: string): string {
+  // 仅闭合未配对的 ``` 代码块，不做其他猜测性修改
+  let fenceCount = 0
+  for (let i = 0; i < text.length; i++) {
+    if (text.substring(i, i + 3) === '```') {
+      fenceCount++
+      i += 2
+    }
+  }
+  if (fenceCount % 2 !== 0) {
+    text += '\n```'
+  }
+  return text
+}
+
+// ==========================================
+// 核心正则纠错处理器
+// 保留必要的规范化，修复 AI 输出常见问题，但不做过度修改
+// ==========================================
+function fixAiMarkdown(text: string): string {
+  if (!text) return ''
+
+  // 1. 统一换行符
+  text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+
+  // 2. ``` 紧贴文字时加换行
+  text = text.replace(/([^\s\n])(```)/g, '$1\n$2')
+
+  // 3. 逐行处理（跳过代码块内部）
+  const lines = text.split('\n')
+  const result: string[] = []
+  let inCodeBlock = false
+
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i]
+    const trimmed = line.trim()
+
+    if (trimmed.startsWith('```')) {
+      inCodeBlock = !inCodeBlock
+      result.push(line)
+      continue
+    }
+    if (inCodeBlock) {
+      // 代码块内部不做任何修改
+      result.push(line)
+      continue
+    }
+
+    // ---- tab 表格 → pipe 表格 ----
+    if (line.includes('\t') && !trimmed.startsWith('>') && !trimmed.startsWith('#')) {
+      const cells = line.split('\t').map(c => c.trim()).filter(c => c !== '')
+      if (cells.length >= 2) {
+        result.push('| ' + cells.join(' | ') + ' |')
+        continue
+      }
+    }
+
+    // ---- 表格分隔符标准化 ----
+    // 仅处理真正的表格分隔行（含 | 和 -/:），不误伤 HR（---/***/___）
+    // 关键：必须包含 | 才认为是表格分隔符，纯 --- 是 HR 不动
+    if (/^\|?[\s:\-—–|]+\|?$/.test(trimmed) && trimmed.includes('|') && /[—–\-]/.test(trimmed)) {
+      const pipeCount = (trimmed.match(/\|/g) || []).length
+      const colCount = Math.max(1, pipeCount > 1 ? pipeCount - 1 : 1)
+      result.push('|' + ' --- |'.repeat(colCount).trim())
+      continue
+    }
+
+    // ---- 标题前缺空格修复：##标题 → ## 标题 ----
+    line = line.replace(/^(#{1,6})([^\s#])/gm, '$1 $2')
+
+    result.push(line)
+  }
+
+  // 4. 表格状态机：确保表格前后有空行，且缺少分隔行时自动补上
+  const finalLines: string[] = []
+  let inTable = false
+  let tableColCount = 0
+
+  for (let i = 0; i < result.length; i++) {
+    const line = result[i]
+    const trimmed = line.trim()
+
+    if (trimmed.startsWith('```')) {
+      inTable = false
+      finalLines.push(line)
+      continue
+    }
+
+    // 识别表格行：必须匹配 |xxx|xxx| 格式（不误伤代码中的 a|b）
+    const isTableRow = /^\|.+\|$/.test(trimmed)
+    const isTableSeparator = /^\|(?:\s*:?-+:?\s*\|)+$/.test(trimmed)
+
+    if (isTableRow || isTableSeparator) {
+      if (!inTable) {
+        // 表格开始：前面加空行
+        if (finalLines.length > 0 && finalLines[finalLines.length - 1].trim() !== '') {
+          finalLines.push('')
+        }
+        inTable = true
+        tableColCount = (trimmed.match(/\|/g) || []).length - 1
+
+        // 检查下一行是否已经是分隔线，如果不是才补上
+        if (!isTableSeparator && tableColCount > 0) {
+          const nextLine = result[i + 1]?.trim() || ''
+          const nextIsSeparator = /^\|(?:\s*:?-+:?\s*\|)+$/.test(nextLine)
+          finalLines.push(line)
+          if (!nextIsSeparator) {
+            finalLines.push('|' + '---|'.repeat(tableColCount))
+          }
+          continue
+        }
+      }
+      finalLines.push(line)
+      continue
+    }
+
+    // 非表格行
+    if (inTable && trimmed !== '') {
+      // 表格结束：后面加空行
+      if (finalLines.length > 0 && finalLines[finalLines.length - 1].trim() !== '') {
+        finalLines.push('')
+      }
+      inTable = false
+    }
+    finalLines.push(line)
+  }
+
+  return finalLines.join('\n')
+}
+
+function escapeText(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\n/g, '<br>')
+}

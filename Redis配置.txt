@@ -1,0 +1,4 @@
+# Redis配置（目前未使用）
+spring.data.redis.host=localhost
+spring.data.redis.port=6379
+spring.data.redis.password=123456
