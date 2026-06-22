@@ -33,6 +33,9 @@ departments/
 .env.local
 .env.*.local
 
+# Real config with secrets
+application.properties
+
 # OS files
 Thumbs.db
 .DS_Store
